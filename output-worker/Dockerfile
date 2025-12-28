@@ -1,34 +1,35 @@
-# syntax=docker/dockerfile:1
+# ---------------------------------------------------
+# 1. Builder Stage
+# ---------------------------------------------------
+FROM rust:1.92-slim-bookworm AS builder-rust
 
-ARG RUST_VERSION=1.92-trixie
+# Install build dependencies
+# protobuf-compiler is often needed for the shared libraries in the workspace
+RUN apt-get update && apt-get install -y protobuf-compiler pkg-config libssl-dev
 
-FROM rust:${RUST_VERSION} AS builder-rust
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y protobuf-compiler
+# Copy the entire source code
+COPY . .
 
-RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
-    --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
-    --mount=type=bind,source=api,target=api \
-    --mount=type=bind,source=clients/rust,target=clients/rust \
-    --mount=type=bind,source=output-worker,target=output-worker \
-    --mount=type=bind,source=sentry-integration,target=sentry-integration \
-    --mount=type=bind,source=protobuf,target=protobuf \
-    --mount=type=cache,sharing=private,target=/app/target/ \
-    --mount=type=cache,sharing=private,target=/usr/local/cargo/registry/ \
-    <<EOF
-set -e
-cd output-worker || exit 1
-SQLX_OFFLINE=true cargo build --locked --release
-cd .. || exit 1
-cp ./target/release/hook0-output-worker /
-EOF
+# Build the Output Worker
+# - We do NOT use "--no-default-features" here because the worker relies on the defaults.
+# - We target the specific binary "hook0-output-worker".
+RUN SQLX_OFFLINE=true cargo build --release --bin hook0-output-worker --locked
 
-FROM debian:trixie-slim
+# ---------------------------------------------------
+# 2. Runtime Stage
+# ---------------------------------------------------
+FROM debian:bookworm-slim
+
 ARG UID=10001
+
+# Install runtime dependencies
+# "ca-certificates" is CRITICAL here because the worker sends HTTPS webhooks to external URLs.
 RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends adduser curl \
+    && apt-get install -y --no-install-recommends adduser curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
 RUN adduser \
     --disabled-password \
     --gecos "" \
@@ -37,7 +38,11 @@ RUN adduser \
     --no-create-home \
     --uid "${UID}" \
     appuser
-USER appuser
-COPY --from=builder-rust /hook0-output-worker /
 
+USER appuser
+
+# Copy the binary from builder
+COPY --from=builder-rust /app/target/release/hook0-output-worker /hook0-output-worker
+
+# Start the worker
 CMD ["/hook0-output-worker"]
