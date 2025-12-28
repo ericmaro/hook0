@@ -1,35 +1,35 @@
-# syntax=docker/dockerfile:1
+# ---------------------------------------------------
+# 1. Builder Stage
+# ---------------------------------------------------
+FROM rust:1.92-slim-bookworm AS builder-rust
 
-ARG RUST_VERSION=1.92-trixie
+# Install dependencies required for building (Protobuf is needed for gRPC)
+RUN apt-get update && apt-get install -y protobuf-compiler pkg-config libssl-dev
 
-FROM rust:${RUST_VERSION} AS builder-rust
 WORKDIR /app
+
+# COPY the entire source code into the container
+# This replaces the complex "--mount=type=bind" commands
+COPY . .
+
+# Build the API
+# We use SQLX_OFFLINE=true to avoid needing a live DB connection during build
 ARG FEATURES=""
+RUN SQLX_OFFLINE=true cargo build --release --bin hook0-api --locked --no-default-features --features "${FEATURES}"
 
-RUN apt-get update && apt-get install -y protobuf-compiler
+# ---------------------------------------------------
+# 2. Runtime Stage
+# ---------------------------------------------------
+FROM debian:bookworm-slim
 
-RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
-    --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
-    --mount=type=bind,source=api,target=api \
-    --mount=type=bind,source=clients/rust,target=clients/rust \
-    --mount=type=bind,source=output-worker,target=output-worker \
-    --mount=type=bind,source=sentry-integration,target=sentry-integration \
-    --mount=type=bind,source=protobuf,target=protobuf \
-    --mount=type=cache,sharing=private,target=/app/target/ \
-    --mount=type=cache,sharing=private,target=/usr/local/cargo/registry/ \
-    <<EOF
-set -e
-cd api || exit 1
-SQLX_OFFLINE=true cargo build --locked --release --no-default-features --features "${FEATURES}"
-cd .. || exit 1
-cp ./target/release/hook0-api /
-EOF
-
-FROM debian:trixie-slim
 ARG UID=10001
+
+# Install runtime dependencies (curl for healthchecks, ca-certificates for SSL)
 RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends adduser curl \
+    && apt-get install -y --no-install-recommends adduser curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user for security
 RUN adduser \
     --disabled-password \
     --gecos "" \
@@ -38,8 +38,14 @@ RUN adduser \
     --no-create-home \
     --uid "${UID}" \
     appuser
+
 USER appuser
-COPY --from=builder-rust /hook0-api /
+
+# Copy the compiled binary from the builder stage
+COPY --from=builder-rust /app/target/release/hook0-api /hook0-api
+
+# Set environment variables
 ENV DISABLE_SERVING_WEBAPP=true
 
+# Start the application
 CMD ["/hook0-api"]
