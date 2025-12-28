@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 ARG NODE_VERSION=24
 ARG CADDY_VERSION=2.10
 
