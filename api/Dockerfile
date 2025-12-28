@@ -3,19 +3,19 @@
 # ---------------------------------------------------
 FROM rust:1.92-slim-bookworm AS builder-rust
 
-# Install dependencies required for building (Protobuf is needed for gRPC)
+# Install build dependencies
 RUN apt-get update && apt-get install -y protobuf-compiler pkg-config libssl-dev
 
 WORKDIR /app
 
-# COPY the entire source code into the container
-# This replaces the complex "--mount=type=bind" commands
+# Copy source code
 COPY . .
 
 # Build the API
-# We use SQLX_OFFLINE=true to avoid needing a live DB connection during build
-ARG FEATURES=""
-RUN SQLX_OFFLINE=true cargo build --release --bin hook0-api --locked --no-default-features --features "${FEATURES}"
+# CHANGE: Added specific features that were previously in docker-compose
+# - reqwest-rustls-tls-webpki-roots: Required for secure HTTP requests
+# - application-secret-compatibility: Required for Hook0 logic
+RUN SQLX_OFFLINE=true cargo build --release --bin hook0-api --locked --no-default-features --features "reqwest-rustls-tls-webpki-roots,application-secret-compatibility"
 
 # ---------------------------------------------------
 # 2. Runtime Stage
@@ -24,12 +24,11 @@ FROM debian:bookworm-slim
 
 ARG UID=10001
 
-# Install runtime dependencies (curl for healthchecks, ca-certificates for SSL)
+# Install runtime dependencies
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends adduser curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user for security
 RUN adduser \
     --disabled-password \
     --gecos "" \
@@ -41,11 +40,9 @@ RUN adduser \
 
 USER appuser
 
-# Copy the compiled binary from the builder stage
+# Copy the binary
 COPY --from=builder-rust /app/target/release/hook0-api /hook0-api
 
-# Set environment variables
 ENV DISABLE_SERVING_WEBAPP=true
 
-# Start the application
 CMD ["/hook0-api"]
